@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Painel Saúde Interativo</title>
+  <!-- Estilos externos -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css"/>
+  <style>
+    body{margin:0;font-family:Arial,sans-serif;background:#f5f5f5;}
+    header{background:#0275d8;color:#fff;padding:1em;}
+    .filters select{margin-right:10px;padding:0.5em;font-size:1em;}
+    main{display:flex;flex-wrap:wrap;}
+    #map-container{flex:2 1 600px;min-height:500px;}
+    #map{height:500px;}
+    #info{flex:1 1 300px;padding:1em;}
+    #stats-container{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:1em;}
+    .stat-card{background:white;padding:1em;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);text-align:center;}
+    canvas{width:100%!important;height:300px!important;}
+    #table-section{width:100%;padding:1em;background:white;border-radius:8px;margin-top:1em;}
+    #download-csv,#download-chart{margin-top:10px;padding:0.5em 1em;background:#0275d8;color:white;border:none;border-radius:4px;cursor:pointer;}
+    #download-csv:hover,#download-chart:hover{background:#025aa5;}
+    .info.legend{background:white;padding:10px;line-height:18px;color:#555;}
+    .info.legend i{width:18px;height:18px;float:left;margin-right:8px;opacity:0.7;}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Painel Saúde Interativo</h1>
+  <div class="filters">
+    <select id="dataset-select">
+      <option value="">Selecione dataset</option>
+      <option value="sinan/dengue">Dengue (SINAN)</option>
+      <option value="sinan/chikungunya">Chikungunya (SINAN)</option>
+      <option value="ranking/ocupacao-hospitalar-covid">COVID (ocupação)</option>
+    </select>
+    <select id="state-select"><option value="">Todos os estados</option></select>
+    <select id="faixa-etaria">
+      <option value="">Todas idades</option>
+      <option value="0-9">0–9 anos</option>
+      <option value="10-19">10–19 anos</option>
+      <option value="20-39">20–39 anos</option>
+      <option value="40-59">40–59 anos</option>
+      <option value="60+">60+ anos</option>
+    </select>
+    <select id="tipo-caso">
+      <option value="">Todos os tipos de caso</option>
+      <option value="confirmado">Confirmado</option>
+      <option value="suspeito">Suspeito</option>
+    </select>
+    <select id="gravidade">
+      <option value="">Todas gravidades</option>
+      <option value="leve">Leve</option>
+      <option value="grave">Grave</option>
+    </select>
+    <button id="download-chart">Baixar Gráfico (PNG)</button>
+  </div>
+</header>
+<main>
+  <section id="map-container"><div id="map"></div></section>
+  <section id="info">
+    <div id="stats"><h2>Estatísticas</h2><div id="stats-container"></div></div>
+    <div id="chart"><h2>Gráfico Temporal</h2><canvas id="chartCanvas"></canvas></div>
+    <section id="table-section">
+      <h2>Detalhes dos Registros</h2>
+      <table id="data-table" class="display"><thead><tr><th>Data</th><th>Município</th><th>UF</th><th>Idade</th><th>Tipo de Caso</th></tr></thead><tbody></tbody></table>
+      <button id="download-csv">Download CSV</button>
+    </section>
+  </section>
+</main>
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  // Código JavaScript: utils, gráficos, mapas e app combinados
+  let currentFilteredData = [], map, heatLayer, clusterGroup, geojsonLayer, chart;
+  window.onload = () => {
+    map = L.map('map').setView([-15.78,-47.93],4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+    ['dataset-select','state-select','faixa-etaria','tipo-caso','gravidade'].forEach(id =>
+      document.getElementById(id).addEventListener('change', loadData));
+    document.getElementById('download-csv').onclick = downloadCSV;
+    document.getElementById('download-chart').onclick = downloadChartImage;
+  };
+  function applyFilters(dados){ const uf=document.getElementById('state-select').value, idadeFaixa=document.getElementById('faixa-etaria').value, tipoCaso=document.getElementById('tipo-caso').value, gravidade=document.getElementById('gravidade').value;
+    return dados.filter(d=>{
+      const idadeNum=parseInt(d.idade||d.idade_paciente||0,10);
+      let okUF=!uf||d.UF===uf,
+          okIdade=true, okTipo=!tipoCaso||(d.tipo||d.classificacao||'').toLowerCase()===tipoCaso,
+          okGravidade=true;
+      if(gravidade){ const g=(d.gravidade||'').toLowerCase(); okGravidade=(gravidade==='grave'&&g==='grave')||(gravidade==='leve'&&g!=='grave'); }
+      if(idadeFaixa==='0-9') okIdade=idadeNum<=9;
+      else if(idadeFaixa==='10-19') okIdade=idadeNum>=10&&idadeNum<=19;
+      else if(idadeFaixa==='20-39') okIdade=idadeNum>=20&&idadeNum<=39;
+      else if(idadeFaixa==='40-59') okIdade=idadeNum>=40&&idadeNum<=59;
+      else if(idadeFaixa==='60+') okIdade=idadeNum>=60;
+      return okUF&&okIdade&&okTipo&&okGravidade;
+    }); }
+  function renderStats(dados){ document.getElementById('stats-container').innerHTML=`<div class="stat-card"><h3>Total registros</h3><p>${dados.length}</p></div>`; }
+  function populateTable(records){
+    const tbody=$('#data-table tbody'); tbody.empty();
+    records.forEach(d=>{
+      tbody.append(`<tr><td>${d.data_notificacao||d.data||''}</td><td>${d.municipio||''}</td><td>${d.UF||''}</td><td>${d.idade||d.idade_paciente||''}</td><td>${d.tipo||d.classificacao||''}</td></tr>`);
+    });
+    $('#data-table').DataTable({destroy:true,pageLength:10,order:[[0,'asc']]});
+  }
+  function downloadCSV(){ if(!currentFilteredData||!currentFilteredData.length) return alert('Nada para exportar');
+    const headers=['Data','Município','UF','Idade','Tipo de Caso'];
+    const rows=currentFilteredData.map(d=>[d.data_notificacao||d.data||'',d.municipio||'',d.UF||'',d.idade||d.idade_paciente||'',d.tipo||d.classificacao||'']);
+    const csv=[headers,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='dados_saude.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);
+  }
+  function downloadChartImage(){ if(!chart)return alert('Gráfico não disponível');const link=document.createElement('a');link.href=chart.toBase64Image();link.download='grafico_casos.png';document.body.appendChild(link);link.click();document.body.removeChild(link); }
+  function getColor(d){return d>1000?'#800026':d>500?'#BD0026':d>200?'#E31A1C':d>100?'#FC4E2A':d>50?'#FD8D3C':d>20?'#FEB24C':d>10?'#FED976':'#FFEDA0';}
+  async function renderMapFull(dados){
+    const resp=await fetch('geo/geojs-100-mun.json');const geojson=await resp.json();
+    const countByMun={};dados.forEach(d=>{ if(d.cod_mun) countByMun[d.cod_mun]= (countByMun[d.cod_mun]||0)+1; });
+    geojson.features.forEach(f=>f.properties.count=countByMun[f.properties.code]||0);
+    const pontos=dados.filter(d=>d.latitude&&d.longitude).map(d=>[d.latitude,d.longitude,0.5]);
+    if(heatLayer) heatLayer.setLatLngs(pontos); else heatLayer=L.heatLayer(pontos,{radius:25,blur:15,maxZoom:6}).addTo(map);
+    if(clusterGroup)map.removeLayer(clusterGroup); clusterGroup=L.markerClusterGroup();
+    dados.forEach(d=>{ if(d.latitude&&d.longitude){ L.marker([d.latitude,d.longitude]).bindPopup(`<strong>Data:</strong> ${d.data_notificacao}<br><strong>Município:</strong> ${d.municipio}`).addTo(clusterGroup);} });
+    map.addLayer(clusterGroup);
+    if(geojsonLayer) map.removeLayer(geojsonLayer);
+    geojsonLayer = L.geoJson(geojson,{style:f=>({fillColor:getColor(f.properties.count),weight:1,opacity:1,color:'white',dashArray:'3',fillOpacity:0.6}), onEachFeature:(f,l)=>{l.on({mouseover:e=>{l.setStyle({weight:3,color:'#666',fillOpacity:0.8});l.bringToFront();},mouseout:e=>geojsonLayer.resetStyle(l),click:()=>l.bindPopup(`${f.properties.name}<br>Casos: ${f.properties.count}`).openPopup()});}}).addTo(map);
+    const legend=L.control({position:'bottomright'});legend.onAdd=()=>{const div=L.DomUtil.create('div','info legend'),grades=[0,10,20,50,100,200,500,1000];grades.forEach((g,i)=>{const next=grades[i+1];div.innerHTML+=`<i style="background:${getColor(g+1)}"></i> `+g+(next?`&ndash;${next}<br>`:'+');});return div;};legend.addTo(map);
+    if(heatLayer.getBounds().isValid()) map.fitBounds(heatLayer.getBounds(),{maxZoom:6});
+  }
+  async function loadData(){
+    const sel=document.getElementById('dataset-select').value; if(!sel)return;
+    const res=await fetch(`https://apidadosabertos.saude.gov.br/series/api/${sel}?page_size=10000`);
+    const json=await res.json();const dados=json.data||[];
+    currentFilteredData=applyFilters(dados);
+    renderStats(currentFilteredData); renderChart(); populateTable(currentFilteredData); await renderMapFull(currentFilteredData);
+    const ufs=[...new Set(dados.map(d=>d.UF).filter(u=>u))];
+    document.getElementById('state-select').innerHTML='<option value="">Todos os estados</option>'+ufs.map(u=>`<option value="${u}">${u}</option>`).join('');
+  }
+  function renderChart(){
+    if(chart)chart.destroy(); const contagem={},data=currentFilteredData;
+    data.forEach(d=>{const dt=d.data_notificacao||d.data||'';if(!dt)return;contagem[dt]=(contagem[dt]||0)+1;});
+    const labels=Object.keys(contagem).sort(),vals=labels.map(l=>contagem[l]);const ctx=document.getElementById('chartCanvas').getContext('2d');
+    chart=new Chart(ctx,{type:'line',data:{labels, datasets:[{label:'Casos por data',data:vals,borderColor:'#0275d8',fill:true}]},options:{responsive:true,scales:{y:{beginAtZero:true}}}});
+  }
+</script>
+</body>
+</html>
